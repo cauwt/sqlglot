@@ -154,7 +154,9 @@ class TestClickhouse(Validator):
         self.validate_identity("TRUNCATE TABLE t1 ON CLUSTER test_cluster")
         self.validate_identity("TRUNCATE DATABASE db")
         self.validate_identity("TRUNCATE DATABASE db ON CLUSTER test_cluster")
-
+        self.validate_identity(
+            "CREATE TABLE t (foo String CODEC(LZ4HC(9), ZSTD, DELTA), size String ALIAS formatReadableSize(size_bytes), INDEX idx1 a TYPE bloom_filter(0.001) GRANULARITY 1, INDEX idx2 a TYPE set(100) GRANULARITY 2, INDEX idx3 a TYPE minmax GRANULARITY 3)"
+        )
         self.validate_all(
             "SELECT arrayJoin([1,2,3])",
             write={
@@ -406,6 +408,19 @@ class TestClickhouse(Validator):
         self.validate_identity("SELECT * FROM t FORMAT TabSeparated")
         self.validate_identity("SELECT FORMAT")
         self.validate_identity("1 AS FORMAT").assert_is(exp.Alias)
+
+        self.validate_identity("SELECT DATE_FORMAT(NOW(), '%Y-%m-%d', '%T')")
+        self.validate_all(
+            "SELECT DATE_FORMAT(NOW(), '%Y-%m-%d')",
+            read={
+                "clickhouse": "SELECT formatDateTime(NOW(), '%Y-%m-%d')",
+                "mysql": "SELECT DATE_FORMAT(NOW(), '%Y-%m-%d')",
+            },
+            write={
+                "clickhouse": "SELECT DATE_FORMAT(NOW(), '%Y-%m-%d')",
+                "mysql": "SELECT DATE_FORMAT(NOW(), '%Y-%m-%d')",
+            },
+        )
 
     def test_cte(self):
         self.validate_identity("WITH 'x' AS foo SELECT foo")
@@ -807,4 +822,7 @@ LIFETIME(MIN 0 MAX 0)""",
 )"""
             },
             pretty=True,
+        )
+        self.validate_identity(
+            "CREATE TABLE t1 (a String EPHEMERAL, b String EPHEMERAL func(), c String MATERIALIZED func(), d String ALIAS func()) ENGINE=TinyLog()"
         )

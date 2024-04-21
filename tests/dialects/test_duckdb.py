@@ -16,6 +16,13 @@ class TestDuckDB(Validator):
         )
 
         self.validate_all(
+            "SELECT CAST('2020-01-01' AS DATE) + INTERVAL (day_offset) DAY FROM t",
+            read={
+                "duckdb": "SELECT CAST('2020-01-01' AS DATE) + INTERVAL (day_offset) DAY FROM t",
+                "mysql": "SELECT DATE '2020-01-01' + INTERVAL day_offset DAY FROM t",
+            },
+        )
+        self.validate_all(
             "SELECT CAST('09:05:03' AS TIME) + INTERVAL 2 HOUR",
             read={
                 "bigquery": "SELECT TIME_ADD(CAST('09:05:03' AS TIME), INTERVAL 2 HOUR)",
@@ -231,6 +238,9 @@ class TestDuckDB(Validator):
             parse_one("a // b", read="duckdb").assert_is(exp.IntDiv).sql(dialect="duckdb"), "a // b"
         )
 
+        self.validate_identity("SELECT MAP(['key1', 'key2', 'key3'], [10, 20, 30])")
+        self.validate_identity("SELECT MAP {'x': 1}")
+        self.validate_identity("SELECT (MAP {'x': 1})['x']")
         self.validate_identity("SELECT df1.*, df2.* FROM df1 POSITIONAL JOIN df2")
         self.validate_identity("MAKE_TIMESTAMP(1992, 9, 20, 13, 34, 27.123456)")
         self.validate_identity("MAKE_TIMESTAMP(1667810584123456)")
@@ -1065,6 +1075,7 @@ class TestDuckDB(Validator):
             write={
                 "snowflake": "ALTER TABLE db.t1 RENAME TO db.t2",
                 "duckdb": "ALTER TABLE db.t1 RENAME TO t2",
+                "tsql": "EXEC sp_rename 'db.t1', 't2'",
             },
         )
 

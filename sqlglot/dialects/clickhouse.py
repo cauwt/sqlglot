@@ -6,6 +6,7 @@ from sqlglot import exp, generator, parser, tokens, transforms
 from sqlglot.dialects.dialect import (
     Dialect,
     arg_max_or_min_no_count,
+    build_formatted_time,
     date_delta_sql,
     inline_array_sql,
     json_extract_segments,
@@ -17,6 +18,16 @@ from sqlglot.dialects.dialect import (
 )
 from sqlglot.helper import is_int, seq_get
 from sqlglot.tokens import Token, TokenType
+
+
+def _build_date_format(args: t.List) -> exp.TimeToStr:
+    expr = build_formatted_time(exp.TimeToStr, "clickhouse")(args)
+
+    timezone = seq_get(args, 2)
+    if timezone:
+        expr.set("timezone", timezone)
+
+    return expr
 
 
 def _lower_func(sql: str) -> str:
@@ -50,7 +61,7 @@ class ClickHouse(Dialect):
     SAFE_DIVISION = True
     LOG_BASE_FIRST: t.Optional[bool] = None
 
-    ESCAPE_SEQUENCES = {
+    UNESCAPED_SEQUENCES = {
         "\\0": "\0",
     }
 
@@ -105,6 +116,7 @@ class ClickHouse(Dialect):
         # * select x from t1 union all select x from t2 limit 1;
         # * select x from t1 union all (select x from t2 limit 1);
         MODIFIERS_ATTACHED_TO_UNION = False
+        INTERVAL_SPANS = False
 
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
@@ -123,6 +135,8 @@ class ClickHouse(Dialect):
             "DATEDIFF": lambda args: exp.DateDiff(
                 this=seq_get(args, 2), expression=seq_get(args, 1), unit=seq_get(args, 0)
             ),
+            "DATE_FORMAT": _build_date_format,
+            "FORMATDATETIME": _build_date_format,
             "JSONEXTRACTSTRING": build_json_extract_path(
                 exp.JSONExtractScalar, zero_based_indexing=False
             ),
@@ -260,6 +274,11 @@ class ClickHouse(Dialect):
             "ArgMax",
         ]
 
+        FUNC_TOKENS = {
+            *parser.Parser.FUNC_TOKENS,
+            TokenType.SET,
+        }
+
         AGG_FUNC_MAPPING = (
             lambda functions, suffixes: {
                 f"{f}{sfx}": (f, sfx) for sfx in (suffixes + [""]) for f in functions
@@ -320,6 +339,17 @@ class ClickHouse(Dialect):
             TokenType.FORMAT: lambda self: ("format", self._advance() or self._parse_id_var()),
         }
 
+        CONSTRAINT_PARSERS = {
+            **parser.Parser.CONSTRAINT_PARSERS,
+            "INDEX": lambda self: self._parse_index_constraint(),
+            "CODEC": lambda self: self._parse_compress(),
+        }
+
+        SCHEMA_UNNAMED_CONSTRAINTS = {
+            *parser.Parser.SCHEMA_UNNAMED_CONSTRAINTS,
+            "INDEX",
+        }
+
         def _parse_conjunction(self) -> t.Optional[exp.Expression]:
             this = super()._parse_conjunction()
 
@@ -366,6 +396,7 @@ class ClickHouse(Dialect):
             alias_tokens: t.Optional[t.Collection[TokenType]] = None,
             parse_bracket: bool = False,
             is_db_reference: bool = False,
+            parse_partition: bool = False,
         ) -> t.Optional[exp.Expression]:
             this = super()._parse_table(
                 schema=schema,
@@ -430,9 +461,13 @@ class ClickHouse(Dialect):
             functions: t.Optional[t.Dict[str, t.Callable]] = None,
             anonymous: bool = False,
             optional_parens: bool = True,
+            any_token: bool = False,
         ) -> t.Optional[exp.Expression]:
             func = super()._parse_function(
-                functions=functions, anonymous=anonymous, optional_parens=optional_parens
+                functions=functions,
+                anonymous=anonymous,
+                optional_parens=optional_parens,
+                any_token=any_token,
             )
 
             if isinstance(func, exp.Anonymous):
@@ -510,6 +545,27 @@ class ClickHouse(Dialect):
                 else:
                     self._retreat(index)
             return None
+
+        def _parse_index_constraint(
+            self, kind: t.Optional[str] = None
+        ) -> exp.IndexColumnConstraint:
+            # INDEX name1 expr TYPE type1(args) GRANULARITY value
+            this = self._parse_id_var()
+            expression = self._parse_conjunction()
+
+            index_type = self._match_text_seq("TYPE") and (
+                self._parse_function() or self._parse_var()
+            )
+
+            granularity = self._match_text_seq("GRANULARITY") and self._parse_term()
+
+            return self.expression(
+                exp.IndexColumnConstraint,
+                this=this,
+                expression=expression,
+                index_type=index_type,
+                granularity=granularity,
+            )
 
     class Generator(generator.Generator):
         QUERY_HINTS = False
@@ -589,6 +645,10 @@ class ClickHouse(Dialect):
             exp.Array: inline_array_sql,
             exp.CastToStrType: rename_func("CAST"),
             exp.CountIf: rename_func("countIf"),
+            exp.CompressColumnConstraint: lambda self,
+            e: f"CODEC({self.expressions(e, key='this', flat=True)})",
+            exp.ComputedColumnConstraint: lambda self,
+            e: f"{'MATERIALIZED' if e.args.get('persisted') else 'ALIAS'} {self.sql(e, 'this')}",
             exp.CurrentDate: lambda self, e: self.func("CURRENT_DATE"),
             exp.DateAdd: date_delta_sql("DATE_ADD"),
             exp.DateDiff: date_delta_sql("DATE_DIFF"),
@@ -611,6 +671,9 @@ class ClickHouse(Dialect):
             exp.StrPosition: lambda self, e: self.func(
                 "position", e.this, e.args.get("substr"), e.args.get("position")
             ),
+            exp.TimeToStr: lambda self, e: self.func(
+                "DATE_FORMAT", e.this, self.format_time(e), e.args.get("timezone")
+            ),
             exp.VarMap: lambda self, e: _lower_func(var_map_sql(self, e)),
             exp.Xor: lambda self, e: self.func("xor", e.this, e.expression, *e.expressions),
         }
@@ -626,6 +689,7 @@ class ClickHouse(Dialect):
         TABLE_HINTS = False
         EXPLICIT_UNION = True
         GROUPINGS_SEP = ""
+        OUTER_UNION_MODIFIERS = False
 
         # there's no list in docs, but it can be found in Clickhouse code
         # see `ClickHouse/src/Parsers/ParserCreate*.cpp`
@@ -741,3 +805,15 @@ class ClickHouse(Dialect):
         def prewhere_sql(self, expression: exp.PreWhere) -> str:
             this = self.indent(self.sql(expression, "this"))
             return f"{self.seg('PREWHERE')}{self.sep()}{this}"
+
+        def indexcolumnconstraint_sql(self, expression: exp.IndexColumnConstraint) -> str:
+            this = self.sql(expression, "this")
+            this = f" {this}" if this else ""
+            expr = self.sql(expression, "expression")
+            expr = f" {expr}" if expr else ""
+            index_type = self.sql(expression, "index_type")
+            index_type = f" TYPE {index_type}" if index_type else ""
+            granularity = self.sql(expression, "granularity")
+            granularity = f" GRANULARITY {granularity}" if granularity else ""
+
+            return f"INDEX{this}{expr}{index_type}{granularity}"
