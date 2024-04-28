@@ -417,6 +417,7 @@ class Postgres(Dialect):
         LIKE_PROPERTY_INSIDE_SCHEMA = True
         MULTI_ARG_DISTINCT = False
         CAN_IMPLEMENT_ARRAY_ANY = True
+        COPY_HAS_INTO_KEYWORD = False
 
         SUPPORTED_JSON_PATH_PARTS = {
             exp.JSONPathKey,
@@ -431,6 +432,7 @@ class Postgres(Dialect):
             exp.DataType.Type.DOUBLE: "DOUBLE PRECISION",
             exp.DataType.Type.BINARY: "BYTEA",
             exp.DataType.Type.VARBINARY: "BYTEA",
+            exp.DataType.Type.ROWVERSION: "BYTEA",
             exp.DataType.Type.DATETIME: "TIMESTAMP",
         }
 
@@ -517,6 +519,7 @@ class Postgres(Dialect):
             exp.Variance: rename_func("VAR_SAMP"),
             exp.Xor: bool_xor_sql,
         }
+        TRANSFORMS.pop(exp.CommentColumnConstraint)
 
         PROPERTIES_LOCATION = {
             **generator.Generator.PROPERTIES_LOCATION,
@@ -524,6 +527,10 @@ class Postgres(Dialect):
             exp.TransientProperty: exp.Properties.Location.UNSUPPORTED,
             exp.VolatileProperty: exp.Properties.Location.UNSUPPORTED,
         }
+
+        def commentcolumnconstraint_sql(self, expression: exp.CommentColumnConstraint) -> str:
+            self.unsupported("Column comments are not supported in the CREATE statement")
+            return ""
 
         def unnest_sql(self, expression: exp.Unnest) -> str:
             if len(expression.expressions) == 1:
