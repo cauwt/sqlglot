@@ -348,6 +348,9 @@ class Generator(metaclass=_Generator):
     # Whether COPY statement has INTO keyword
     COPY_HAS_INTO_KEYWORD = True
 
+    # Whether the conditional TRY(expression) function is supported
+    TRY_SUPPORTED = True
+
     TYPE_MAPPING = {
         exp.DataType.Type.NCHAR: "CHAR",
         exp.DataType.Type.NVARCHAR: "VARCHAR",
@@ -3167,6 +3170,13 @@ class Generator(metaclass=_Generator):
     def trycast_sql(self, expression: exp.TryCast) -> str:
         return self.cast_sql(expression, safe_prefix="TRY_")
 
+    def try_sql(self, expression: exp.Try) -> str:
+        if not self.TRY_SUPPORTED:
+            self.unsupported("Unsupported TRY function")
+            return self.sql(expression, "this")
+
+        return self.func("TRY", expression.this)
+
     def log_sql(self, expression: exp.Log) -> str:
         this = expression.this
         expr = expression.expression
@@ -3343,9 +3353,10 @@ class Generator(metaclass=_Generator):
 
         then_expression = expression.args.get("then")
         if isinstance(then_expression, exp.Insert):
-            then = f"INSERT {self.sql(then_expression, 'this')}"
-            if "expression" in then_expression.args:
-                then += f" VALUES {self.sql(then_expression, 'expression')}"
+            this = self.sql(then_expression, "this")
+            this = f"INSERT {this}" if this else "INSERT"
+            then = self.sql(then_expression, "expression")
+            then = f"{this} VALUES {then}" if then else this
         elif isinstance(then_expression, exp.Update):
             if isinstance(then_expression.args.get("expressions"), exp.Star):
                 then = f"UPDATE {self.sql(then_expression, 'expressions')}"
@@ -3367,10 +3378,11 @@ class Generator(metaclass=_Generator):
         this = self.sql(table)
         using = f"USING {self.sql(expression, 'using')}"
         on = f"ON {self.sql(expression, 'on')}"
-        expressions = self.expressions(expression, sep=" ")
+        expressions = self.expressions(expression, sep=" ", indent=False)
+        sep = self.sep()
 
         return self.prepend_ctes(
-            expression, f"MERGE INTO {this}{table_alias} {using} {on} {expressions}"
+            expression, f"MERGE INTO {this}{table_alias}{sep}{using}{sep}{on}{sep}{expressions}"
         )
 
     def tochar_sql(self, expression: exp.ToChar) -> str:
@@ -3783,7 +3795,7 @@ class Generator(metaclass=_Generator):
         if isinstance(cred_expr, exp.Literal):
             # Redshift case: CREDENTIALS <string>
             credentials = self.sql(expression, "credentials")
-            credentials = f"CREDENTIALS {credentials}"
+            credentials = f"CREDENTIALS {credentials}" if credentials else ""
         else:
             # Snowflake case: CREDENTIALS = (...)
             credentials = self.expressions(expression, key="credentials", flat=True, sep=" ")
@@ -3793,7 +3805,7 @@ class Generator(metaclass=_Generator):
         storage = f" {storage}" if storage else ""
 
         encryption = self.expressions(expression, key="encryption", flat=True, sep=" ")
-        encryption = f"ENCRYPTION = ({encryption})" if encryption else ""
+        encryption = f" ENCRYPTION = ({encryption})" if encryption else ""
 
         iam_role = self.sql(expression, "iam_role")
         iam_role = f"IAM_ROLE {iam_role}" if iam_role else ""
@@ -3809,7 +3821,6 @@ class Generator(metaclass=_Generator):
 
         credentials = self.sql(expression, "credentials")
         credentials = f" {credentials}" if credentials else ""
-
         kind = " FROM " if expression.args.get("kind") else " TO "
         files = self.expressions(expression, key="files", flat=True)
 

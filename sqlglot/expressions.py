@@ -2083,7 +2083,7 @@ class Insert(DDL, DML):
         "hint": False,
         "with": False,
         "is_function": False,
-        "this": True,
+        "this": False,
         "expression": False,
         "conflict": False,
         "returning": False,
@@ -3934,6 +3934,7 @@ class DataType(Expression):
         TIME = auto()
         TIMETZ = auto()
         TIMESTAMP = auto()
+        TIMESTAMPNTZ = auto()
         TIMESTAMPLTZ = auto()
         TIMESTAMPTZ = auto()
         TIMESTAMP_S = auto()
@@ -3961,6 +3962,7 @@ class DataType(Expression):
         VARIANT = auto()
         XML = auto()
         YEAR = auto()
+        TDIGEST = auto()
 
     STRUCT_TYPES = {
         Type.NESTED,
@@ -4035,6 +4037,7 @@ class DataType(Expression):
         Type.DATETIME64,
         Type.TIME,
         Type.TIMESTAMP,
+        Type.TIMESTAMPNTZ,
         Type.TIMESTAMPLTZ,
         Type.TIMESTAMPTZ,
         Type.TIMESTAMP_MS,
@@ -4872,6 +4875,10 @@ class TryCast(Cast):
     pass
 
 
+class Try(Func):
+    pass
+
+
 class CastToStrType(Func):
     arg_types = {"this": True, "to": True}
 
@@ -5563,7 +5570,6 @@ class RegexpReplace(Func):
         "replacement": False,
         "position": False,
         "occurrence": False,
-        "parameters": False,
         "modifiers": False,
     }
 
@@ -6531,7 +6537,7 @@ def and_(
         **opts: other options to use to parse the input expressions.
 
     Returns:
-        And: the new condition
+        The new condition
     """
     return t.cast(Condition, _combine(expressions, And, dialect, copy=copy, **opts))
 
@@ -6554,9 +6560,32 @@ def or_(
         **opts: other options to use to parse the input expressions.
 
     Returns:
-        Or: the new condition
+        The new condition
     """
     return t.cast(Condition, _combine(expressions, Or, dialect, copy=copy, **opts))
+
+
+def xor(
+    *expressions: t.Optional[ExpOrStr], dialect: DialectType = None, copy: bool = True, **opts
+) -> Condition:
+    """
+    Combine multiple conditions with an XOR logical operator.
+
+    Example:
+        >>> xor("x=1", xor("y=1", "z=1")).sql()
+        'x = 1 XOR (y = 1 XOR z = 1)'
+
+    Args:
+        *expressions: the SQL code strings to parse.
+            If an Expression instance is passed, this is used as-is.
+        dialect: the dialect used to parse the input expression.
+        copy: whether to copy `expressions` (only applies to Expressions).
+        **opts: other options to use to parse the input expressions.
+
+    Returns:
+        The new condition
+    """
+    return t.cast(Condition, _combine(expressions, Xor, dialect, copy=copy, **opts))
 
 
 def not_(expression: ExpOrStr, dialect: DialectType = None, copy: bool = True, **opts) -> Not:

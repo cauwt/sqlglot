@@ -222,6 +222,8 @@ class Presto(Dialect):
             "ROW": TokenType.STRUCT,
             "IPADDRESS": TokenType.IPADDRESS,
             "IPPREFIX": TokenType.IPPREFIX,
+            "TDIGEST": TokenType.TDIGEST,
+            "HYPERLOGLOG": TokenType.HLLSKETCH,
         }
 
         KEYWORDS.pop("QUALIFY")
@@ -316,6 +318,7 @@ class Presto(Dialect):
             exp.DataType.Type.STRUCT: "ROW",
             exp.DataType.Type.DATETIME: "TIMESTAMP",
             exp.DataType.Type.DATETIME64: "TIMESTAMP",
+            exp.DataType.Type.HLLSKETCH: "HYPERLOGLOG",
         }
 
         TRANSFORMS = {

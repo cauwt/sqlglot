@@ -217,6 +217,7 @@ class Parser(metaclass=_Parser):
         TokenType.TIMESTAMP_NS,
         TokenType.TIMESTAMPTZ,
         TokenType.TIMESTAMPLTZ,
+        TokenType.TIMESTAMPNTZ,
         TokenType.DATETIME,
         TokenType.DATETIME64,
         TokenType.DATE,
@@ -265,6 +266,7 @@ class Parser(metaclass=_Parser):
         TokenType.UNKNOWN,
         TokenType.NULL,
         TokenType.NAME,
+        TokenType.TDIGEST,
         *ENUM_TYPE_TOKENS,
         *NESTED_TYPE_TOKENS,
         *AGGREGATE_TYPE_TOKENS,
@@ -598,7 +600,7 @@ class Parser(metaclass=_Parser):
         exp.Condition: lambda self: self._parse_conjunction(),
         exp.DataType: lambda self: self._parse_types(allow_identifiers=False),
         exp.Expression: lambda self: self._parse_expression(),
-        exp.From: lambda self: self._parse_from(),
+        exp.From: lambda self: self._parse_from(joins=True),
         exp.Group: lambda self: self._parse_group(),
         exp.Having: lambda self: self._parse_having(),
         exp.Identifier: lambda self: self._parse_id_var(),
@@ -1587,7 +1589,15 @@ class Parser(metaclass=_Parser):
                     if return_:
                         expression = self.expression(exp.Return, this=expression)
         elif create_token.token_type == TokenType.INDEX:
-            this = self._parse_index(index=self._parse_id_var())
+            # Postgres allows anonymous indexes, eg. CREATE INDEX IF NOT EXISTS ON t(c)
+            if not self._match(TokenType.ON):
+                index = self._parse_id_var()
+                anonymous = False
+            else:
+                index = None
+                anonymous = True
+
+            this = self._parse_index(index=index, anonymous=anonymous)
         elif create_token.token_type in self.DB_CREATABLES:
             table_parts = self._parse_table_parts(
                 schema=True, is_db_reference=create_token.token_type == TokenType.SCHEMA
@@ -2467,14 +2477,17 @@ class Parser(metaclass=_Parser):
             exp.Partition, expressions=self._parse_wrapped_csv(self._parse_conjunction)
         )
 
-    def _parse_value(self) -> exp.Tuple:
+    def _parse_value(self) -> t.Optional[exp.Tuple]:
         if self._match(TokenType.L_PAREN):
             expressions = self._parse_csv(self._parse_expression)
             self._match_r_paren()
             return self.expression(exp.Tuple, expressions=expressions)
 
         # In some dialects we can have VALUES 1, 2 which results in 1 column & 2 rows.
-        return self.expression(exp.Tuple, expressions=[self._parse_expression()])
+        expression = self._parse_expression()
+        if expression:
+            return self.expression(exp.Tuple, expressions=[expression])
+        return None
 
     def _parse_projections(self) -> t.List[exp.Expression]:
         return self._parse_expressions()
@@ -3016,10 +3029,9 @@ class Parser(metaclass=_Parser):
         )
 
     def _parse_index(
-        self,
-        index: t.Optional[exp.Expression] = None,
+        self, index: t.Optional[exp.Expression] = None, anonymous: bool = False
     ) -> t.Optional[exp.Index]:
-        if index:
+        if index or anonymous:
             unique = None
             primary = None
             amp = None
@@ -4311,7 +4323,9 @@ class Parser(metaclass=_Parser):
 
             this = self._parse_query_modifiers(seq_get(expressions, 0))
 
-            if isinstance(this, exp.UNWRAPPED_QUERIES):
+            if not this and self._match(TokenType.R_PAREN, advance=False):
+                this = self.expression(exp.Tuple)
+            elif isinstance(this, exp.UNWRAPPED_QUERIES):
                 this = self._parse_set_operations(
                     self._parse_subquery(this=this, parse_alias=False)
                 )
@@ -4681,7 +4695,7 @@ class Parser(metaclass=_Parser):
                 this.set("cycle", False)
 
             if not identity:
-                this.set("expression", self._parse_bitwise())
+                this.set("expression", self._parse_range())
             elif not this.args.get("start") and self._match(TokenType.NUMBER, advance=False):
                 args = self._parse_csv(self._parse_bitwise)
                 this.set("start", seq_get(args, 0))
@@ -5315,8 +5329,10 @@ class Parser(metaclass=_Parser):
 
         if self._match(TokenType.FROM):
             args.append(self._parse_bitwise())
-            if self._match(TokenType.FOR):
-                args.append(self._parse_bitwise())
+        if self._match(TokenType.FOR):
+            if len(args) == 1:
+                args.append(exp.Literal.number(1))
+            args.append(self._parse_bitwise())
 
         return self.validate_expression(exp.Substring.from_arg_list(args), args)
 
@@ -6299,6 +6315,15 @@ class Parser(metaclass=_Parser):
 
         return self.expression(exp.WithOperator, this=this, op=op)
 
+    def _parse_wrapped_options(self) -> t.List[t.Optional[exp.Expression]]:
+        opts = []
+        self._match(TokenType.EQ)
+        self._match(TokenType.L_PAREN)
+        while self._curr and not self._match(TokenType.R_PAREN):
+            opts.append(self._parse_conjunction())
+            self._match(TokenType.COMMA)
+        return opts
+
     def _parse_copy_parameters(self) -> t.List[exp.CopyParameter]:
         sep = TokenType.COMMA if self.dialect.COPY_PARAMS_ARE_CSV else None
 
@@ -6306,12 +6331,19 @@ class Parser(metaclass=_Parser):
         while self._curr and not self._match(TokenType.R_PAREN, advance=False):
             option = self._parse_unquoted_field()
             value = None
+
             # Some options are defined as functions with the values as params
             if not isinstance(option, exp.Func):
+                prev = self._prev.text.upper()
                 # Different dialects might separate options and values by white space, "=" and "AS"
                 self._match(TokenType.EQ)
                 self._match(TokenType.ALIAS)
-                value = self._parse_unquoted_field()
+
+                if prev == "FILE_FORMAT" and self._match(TokenType.L_PAREN):
+                    # Snowflake FILE_FORMAT case
+                    value = self._parse_wrapped_options()
+                else:
+                    value = self._parse_unquoted_field()
 
             param = self.expression(exp.CopyParameter, this=option, expression=value)
             options.append(param)
@@ -6322,24 +6354,18 @@ class Parser(metaclass=_Parser):
         return options
 
     def _parse_credentials(self) -> t.Optional[exp.Credentials]:
-        def parse_options():
-            opts = []
-            self._match(TokenType.EQ)
-            self._match(TokenType.L_PAREN)
-            while self._curr and not self._match(TokenType.R_PAREN):
-                opts.append(self._parse_conjunction())
-            return opts
-
         expr = self.expression(exp.Credentials)
 
         if self._match_text_seq("STORAGE_INTEGRATION", advance=False):
             expr.set("storage", self._parse_conjunction())
         if self._match_text_seq("CREDENTIALS"):
             # Snowflake supports CREDENTIALS = (...), while Redshift CREDENTIALS <string>
-            creds = parse_options() if self._match(TokenType.EQ) else self._parse_field()
+            creds = (
+                self._parse_wrapped_options() if self._match(TokenType.EQ) else self._parse_field()
+            )
             expr.set("credentials", creds)
         if self._match_text_seq("ENCRYPTION"):
-            expr.set("encryption", parse_options())
+            expr.set("encryption", self._parse_wrapped_options())
         if self._match_text_seq("IAM_ROLE"):
             expr.set("iam_role", self._parse_field())
         if self._match_text_seq("REGION"):
@@ -6347,7 +6373,10 @@ class Parser(metaclass=_Parser):
 
         return expr
 
-    def _parse_copy(self):
+    def _parse_file_location(self) -> t.Optional[exp.Expression]:
+        return self._parse_field()
+
+    def _parse_copy(self) -> exp.Copy | exp.Command:
         start = self._prev
 
         self._match(TokenType.INTO)
@@ -6360,7 +6389,7 @@ class Parser(metaclass=_Parser):
 
         kind = self._match(TokenType.FROM) or not self._match_text_seq("TO")
 
-        files = self._parse_csv(self._parse_conjunction)
+        files = self._parse_csv(self._parse_file_location)
         credentials = self._parse_credentials()
 
         self._match_text_seq("WITH")

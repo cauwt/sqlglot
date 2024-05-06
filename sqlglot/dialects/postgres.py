@@ -32,7 +32,7 @@ from sqlglot.dialects.dialect import (
     trim_sql,
     ts_or_ds_add_cast,
 )
-from sqlglot.helper import seq_get
+from sqlglot.helper import is_int, seq_get
 from sqlglot.parser import binary_range_parser
 from sqlglot.tokens import TokenType
 
@@ -204,6 +204,29 @@ def _json_extract_sql(
     return _generate
 
 
+def _build_regexp_replace(args: t.List) -> exp.RegexpReplace:
+    # The signature of REGEXP_REPLACE is:
+    # regexp_replace(source, pattern, replacement [, start [, N ]] [, flags ])
+    #
+    # Any one of `start`, `N` and `flags` can be column references, meaning that
+    # unless we can statically see that the last argument is a non-integer string
+    # (eg. not '0'), then it's not possible to construct the correct AST
+    if len(args) > 3:
+        last = args[-1]
+        if not is_int(last.name):
+            if not last.type or last.is_type(exp.DataType.Type.UNKNOWN, exp.DataType.Type.NULL):
+                from sqlglot.optimizer.annotate_types import annotate_types
+
+                last = annotate_types(last)
+
+            if last.is_type(*exp.DataType.TEXT_TYPES):
+                regexp_replace = exp.RegexpReplace.from_arg_list(args[:-1])
+                regexp_replace.set("modifiers", last)
+                return regexp_replace
+
+    return exp.RegexpReplace.from_arg_list(args)
+
+
 class Postgres(Dialect):
     INDEX_OFFSET = 1
     TYPED_DIVISION = True
@@ -266,24 +289,25 @@ class Postgres(Dialect):
             "BIGSERIAL": TokenType.BIGSERIAL,
             "CHARACTER VARYING": TokenType.VARCHAR,
             "CONSTRAINT TRIGGER": TokenType.COMMAND,
+            "CSTRING": TokenType.PSEUDO_TYPE,
             "DECLARE": TokenType.COMMAND,
             "DO": TokenType.COMMAND,
             "EXEC": TokenType.COMMAND,
             "HSTORE": TokenType.HSTORE,
+            "INT8": TokenType.BIGINT,
             "JSONB": TokenType.JSONB,
             "MONEY": TokenType.MONEY,
+            "NAME": TokenType.NAME,
+            "OID": TokenType.OBJECT_IDENTIFIER,
+            "ONLY": TokenType.ONLY,
+            "OPERATOR": TokenType.OPERATOR,
             "REFRESH": TokenType.COMMAND,
             "REINDEX": TokenType.COMMAND,
             "RESET": TokenType.COMMAND,
             "REVOKE": TokenType.COMMAND,
             "SERIAL": TokenType.SERIAL,
             "SMALLSERIAL": TokenType.SMALLSERIAL,
-            "NAME": TokenType.NAME,
             "TEMP": TokenType.TEMPORARY,
-            "CSTRING": TokenType.PSEUDO_TYPE,
-            "OID": TokenType.OBJECT_IDENTIFIER,
-            "ONLY": TokenType.ONLY,
-            "OPERATOR": TokenType.OPERATOR,
             "REGCLASS": TokenType.OBJECT_IDENTIFIER,
             "REGCOLLATION": TokenType.OBJECT_IDENTIFIER,
             "REGCONFIG": TokenType.OBJECT_IDENTIFIER,
@@ -320,6 +344,7 @@ class Postgres(Dialect):
             "MAKE_TIME": exp.TimeFromParts.from_arg_list,
             "MAKE_TIMESTAMP": exp.TimestampFromParts.from_arg_list,
             "NOW": exp.CurrentTimestamp.from_arg_list,
+            "REGEXP_REPLACE": _build_regexp_replace,
             "TO_CHAR": build_formatted_time(exp.TimeToStr, "postgres"),
             "TO_TIMESTAMP": _build_to_timestamp,
             "UNNEST": exp.Explode.from_arg_list,
@@ -527,6 +552,10 @@ class Postgres(Dialect):
             exp.TransientProperty: exp.Properties.Location.UNSUPPORTED,
             exp.VolatileProperty: exp.Properties.Location.UNSUPPORTED,
         }
+
+        def schemacommentproperty_sql(self, expression: exp.SchemaCommentProperty) -> str:
+            self.unsupported("Table comments are not supported in the CREATE statement")
+            return ""
 
         def commentcolumnconstraint_sql(self, expression: exp.CommentColumnConstraint) -> str:
             self.unsupported("Column comments are not supported in the CREATE statement")

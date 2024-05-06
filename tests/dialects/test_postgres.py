@@ -312,12 +312,30 @@ class TestPostgres(Validator):
             "MERGE INTO x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET x.a = y.b WHEN NOT MATCHED THEN INSERT (a, b) VALUES (y.a, y.b)",
             "MERGE INTO x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET a = y.b WHEN NOT MATCHED THEN INSERT (a, b) VALUES (y.a, y.b)",
         )
-        self.validate_identity("SELECT * FROM t1*", "SELECT * FROM t1")
+        self.validate_identity(
+            "SELECT * FROM t1*",
+            "SELECT * FROM t1",
+        )
+        self.validate_identity(
+            "SELECT SUBSTRING('afafa' for 1)",
+            "SELECT SUBSTRING('afafa' FROM 1 FOR 1)",
+        )
+        self.validate_identity(
+            "CAST(x AS INT8)",
+            "CAST(x AS BIGINT)",
+        )
 
+        self.validate_all(
+            "SELECT REGEXP_REPLACE('mr .', '[^a-zA-Z]', '', 'g')",
+            write={
+                "duckdb": "SELECT REGEXP_REPLACE('mr .', '[^a-zA-Z]', '', 'g')",
+                "postgres": "SELECT REGEXP_REPLACE('mr .', '[^a-zA-Z]', '', 'g')",
+            },
+        )
         self.validate_all(
             "CREATE TABLE t (c INT)",
             read={
-                "mysql": "CREATE TABLE t (c INT COMMENT 'comment')",
+                "mysql": "CREATE TABLE t (c INT COMMENT 'comment 1') COMMENT = 'comment 2'",
             },
         )
         self.validate_all(
@@ -455,7 +473,7 @@ class TestPostgres(Validator):
             write={
                 "postgres": "SELECT EXTRACT(minute FROM CAST('2023-01-04 04:05:06.789' AS TIMESTAMP))",
                 "redshift": "SELECT EXTRACT(minute FROM CAST('2023-01-04 04:05:06.789' AS TIMESTAMP))",
-                "snowflake": "SELECT DATE_PART(minute, CAST('2023-01-04 04:05:06.789' AS TIMESTAMPNTZ))",
+                "snowflake": "SELECT DATE_PART(minute, CAST('2023-01-04 04:05:06.789' AS TIMESTAMP))",
             },
         )
         self.validate_all(
@@ -692,6 +710,7 @@ class TestPostgres(Validator):
         cdef.args["kind"].assert_is(exp.DataType)
         self.assertEqual(expr.sql(dialect="postgres"), "CREATE TABLE t (x INTERVAL DAY)")
 
+        self.validate_identity("CREATE INDEX IF NOT EXISTS ON t(c)")
         self.validate_identity("CREATE INDEX et_vid_idx ON et(vid) INCLUDE (fid)")
         self.validate_identity("CREATE INDEX idx_x ON x USING BTREE(x, y) WHERE (NOT y IS NULL)")
         self.validate_identity("CREATE TABLE test (elems JSONB[])")
